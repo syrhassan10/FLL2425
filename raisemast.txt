@@ -1,0 +1,198 @@
+from spike import PrimeHub, LightMatrix, Button, StatusLight, ForceSensor, MotionSensor, Speaker, ColorSensor, App, DistanceSensor, Motor, MotorPair
+from spike.control import wait_for_seconds, wait_until, Timer
+from math import *
+
+hub = PrimeHub()
+drive_base = MotorPair('C', 'F')
+LeftMotor = Motor('C')
+RightMotor = Motor('F')
+tail = Motor('A')
+arm = Motor('E')
+# r_col = ColorSensor('D')
+l_col = ColorSensor('B')
+timer = Timer()
+WHEEL_DIAMETER = 5.6 # small spike wheel in cm
+drive_base.set_stop_action('brake')
+
+'''
+Turns the robot left or right as long as the angle is not larger than 180
+Angle is relative to current robot heading (resets heading prior to turning)
+'''
+
+
+
+def turn(target_heading, speed, momentum_error=0):
+    # speed must be positive
+    speed = abs(speed)
+
+    # reset yaw angle to 0
+    hub.motion_sensor.reset_yaw_angle()
+
+    # get initial robot heading
+    robot_heading = hub.motion_sensor.get_yaw_angle()
+
+    # keep turning until goal is reached while accounting for potential momentum error
+    while abs(robot_heading) < (abs(target_heading) - momentum_error):
+        # Calculate the remaining angle to the target
+        remaining_angle = abs(target_heading) - abs(robot_heading)
+
+        # Apply a simple deceleration based on the remaining angle
+        deceleration_factor = max(0.24, min(1, remaining_angle / abs(target_heading)))
+        adjusted_speed = int(speed * deceleration_factor)
+
+        # Turns the robot left or right depending on the target heading sign (positive or negative)
+        right_speed = -adjusted_speed * int(target_heading / abs(target_heading))
+        left_speed = adjusted_speed * int(target_heading / abs(target_heading))
+
+        # Start turning
+        drive_base.start_tank(left_speed, right_speed)
+
+        # Update heading measurement
+        robot_heading = hub.motion_sensor.get_yaw_angle()
+
+    # Stop turning
+    drive_base.stop()
+
+
+
+def go(target_distance, max_speed, target_heading, kp=1.0):
+    """
+    Move robot straight with adaptive acceleration and deceleration
+    Automatically balances speed and precision based on distance and speed
+    Args:
+        target_distance: distance to travel in cm
+        max_speed: maximum speed (-100 to 100, negative for backward)
+        target_heading: target heading angle in degrees
+        kp: proportional gain for heading correction
+    """
+    # Constants for adaptive control
+    MIN_DISTANCE = 10# cm - threshold for short movements
+    MEDIUM_DISTANCE = 50# cm - threshold for medium movements
+    HIGH_SPEED = 70# threshold for high speed movements
+
+    # Calculate adaptive factors based on distance and speed
+    abs_distance = abs(target_distance)
+    abs_speed = abs(max_speed)
+
+    # Base factors adjusted by distance
+    if abs_distance < MIN_DISTANCE:
+        # Short distance: prioritize precision
+        base_accel = 0.35
+        base_decel = 0.35
+    elif abs_distance < MEDIUM_DISTANCE:
+        # Medium distance: balanced approach
+        base_accel = 0.25
+        base_decel = 0.3
+    else:
+        # Long distance: prioritize speed
+        base_accel = 0.15
+        base_decel = 0.2
+
+    # Adjust factors based on speed
+    speed_factor = abs_speed / 100.0
+    if abs_speed > HIGH_SPEED:
+        # High speed: increase acceleration distance for smoothness
+        accel_factor = base_accel * (1 + 0.5 * speed_factor)
+        decel_factor = base_decel * (1 + 0.7 * speed_factor)
+    else:
+        # Lower speed: maintain base factors
+        accel_factor = base_accel
+        decel_factor = base_decel
+
+    # Calculate actual distances while ensuring minimums
+    accel_distance = max(abs_distance * accel_factor, 5)# minimum 5cm
+    decel_distance = max(abs_distance * decel_factor, 5)# minimum 5cm
+
+    # Adjust for very short distances
+    if abs_distance < (accel_distance + decel_distance):
+        total_factor = accel_distance + decel_distance
+        accel_distance = abs_distance * (accel_distance / total_factor)
+        decel_distance = abs_distance * (decel_distance / total_factor)
+
+    # Adjust kp direction based on speed direction
+    if (max_speed < 0):
+        kp = -kp
+
+    # Get movement direction (1 or -1)
+    direction = int(max_speed/abs(max_speed))
+
+    # Reset encoder
+    LeftMotor.set_degrees_counted(0)
+
+    # Get initial position
+    current_position = LeftMotor.get_degrees_counted() / 360 * WHEEL_DIAMETER * 3.141592
+
+    # Calculate minimum speed (adaptive based on distance)
+    min_speed_factor = min(0.3, 3 / abs_distance) if abs_distance > 10 else 0.3
+    MIN_SPEED = max(15, abs_speed * min_speed_factor) * direction
+
+    # Previous speed for smoothing
+    prev_speed = MIN_SPEED
+
+    while abs(current_position) < abs(target_distance):
+        # Calculate remaining distance
+        remaining_distance = abs(target_distance) - abs(current_position)
+
+        # Calculate base speed based on position
+        if abs(current_position) < accel_distance:
+            # Accelerating - smooth quadratic acceleration
+            progress = abs(current_position) / accel_distance
+            speed_factor = progress * (2 - progress)# quadratic easing
+            current_speed = MIN_SPEED + (max_speed - MIN_SPEED) * speed_factor
+
+        elif remaining_distance < decel_distance:
+            # Decelerating - smooth quadratic deceleration
+            progress = remaining_distance / decel_distance
+            speed_factor = progress * (2 - progress)# quadratic easing
+            current_speed = MIN_SPEED + (max_speed - MIN_SPEED) * speed_factor
+
+        else:
+            # Full speed
+            current_speed = max_speed
+
+        # Smooth speed changes
+        smoothing_factor = 0.7
+        current_speed = (current_speed * smoothing_factor +
+                        prev_speed * (1 - smoothing_factor))
+        prev_speed = current_speed
+
+        # Calculate heading correction
+        heading_error = target_heading - hub.motion_sensor.get_yaw_angle()
+
+        # Apply heading correction with adaptive kp
+        # Reduce kp at higher speeds for stability
+        adaptive_kp = kp * (1 - 0.3 * (abs(current_speed) / 100))
+
+        # Apply heading correction
+        right_speed = int(current_speed - heading_error * adaptive_kp * direction)
+        left_speed = int(current_speed + heading_error * adaptive_kp * direction)
+
+        # Drive motors
+        drive_base.start_tank(left_speed, right_speed)
+
+        # Update position
+        current_position = LeftMotor.get_degrees_counted() / 360 * WHEEL_DIAMETER * 3.141592
+
+    # Stop motors
+    drive_base.stop()
+
+
+
+#go: cm/time; speed; heading; kp = 1.5
+#turn: angle; speed; error = 0
+
+#start from left_launch
+hub.motion_sensor.reset_yaw_angle()
+
+#open the arm
+go(47, 50, 0)
+turn(90, 30)
+go(13, 50, 90)
+arm.run_for_degrees(250,30)
+go(1, 50, 90)
+arm.run_for_degrees(-200,100)
+drive_base.move_tank(-80,'cm',100,70)
+
+raise SystemExit
+
+
