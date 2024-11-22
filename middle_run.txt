@@ -187,10 +187,13 @@ hub.motion_sensor.reset_yaw_angle()
 #open the arm
 go(80, 50, 0)
 turn(90, 30)
-go(3.5, 35, 90)
+go(5.5, 35, 90)
 tail.run_for_degrees(-860,70)
-go(70, -75, 90)
+
+go(70, -75, 85)
 turn(179,85)
+turn(10,85)
+
 hub.motion_sensor.reset_yaw_angle()
 
 go(50, 50, 0)
