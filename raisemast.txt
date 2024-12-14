@@ -185,7 +185,7 @@ def go(target_distance, max_speed, target_heading, kp=1.0):
 hub.motion_sensor.reset_yaw_angle()
 
 #open the arm
-go(47, 50, 0)
+go(43, 50, 0)
 turn(90, 30)
 go(13, 50, 90)
 arm.run_for_degrees(250,30)
